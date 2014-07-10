@@ -13,6 +13,10 @@ def configuration(parent_package='',top_path=None):
     config.add_extension('_compiled_base',
                          sources=[join('src', '_compiled_base.c')]
                          )
+    config.add_extension('tokenizer',
+                         sources=[join('src', 'tokenizer.c')],
+                         depends=[join('src', 'tokenizer.h')]
+                         )
 
     config.add_data_dir('benchmarks')
     config.add_data_dir('tests')

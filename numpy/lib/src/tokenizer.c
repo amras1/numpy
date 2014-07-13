@@ -217,17 +217,15 @@ void resize_header(tokenizer_t *self)
 	}						\
     else if (col < self->num_cols)			\
 	RETURN(NOT_ENOUGH_COLS);			\
-    ++self->num_rows;					\
-    if (end != -1 && self->num_rows == end - start)	\
-	done = 1;
+    ++self->num_rows;
 
 // Set the error code to c for later retrieval and return c
 #define RETURN(c) do { self->code = c; return c; } while (0)
 
 #define CHAR(c) (c & 0xFF)
 
-int tokenize(tokenizer_t *self, int start, int end, int header, int *use_cols,
-             int use_cols_len)
+int tokenize(tokenizer_t *self, int header, int *use_cols, int use_cols_len,
+             int skip_rows)
 {
     delete_data(self); // clear old reading data
     uint32_t c; // input code point
@@ -238,12 +236,10 @@ int tokenize(tokenizer_t *self, int start, int end, int header, int *use_cols,
     self->num_rows = 0;
     self->source_pos = self->source;
     int i = 0;
-    int empty = 1;
-    int comment = 0;
     int whitespace = 1;
     int j;
     
-    while (i < start)
+    while (i < skip_rows)
     {
 	if (self->source_pos - self->source >= self->source_len - 1) // ignore final newline
         {
@@ -254,28 +250,10 @@ int tokenize(tokenizer_t *self, int start, int end, int header, int *use_cols,
         }
 
         c = next_char(self);
-
-	if (CHAR(c) != '\n' && empty && ((CHAR(c) != ' ' &&
-            CHAR(c) != '\t') || !self->strip_whitespace_lines || header))
-	{ 
-            // first significant character encountered; during header
-            // tokenization, we count whitespace unlike data tokenization
-            // (see #2654)
-            empty = 0;
-            // comment line
-            if (self->comment != 0 && c == self->comment)
-                comment = 1;
-	}
-        else if (CHAR(c) == '\n')
-        {
-            if (!empty && !comment) // significant line
-                ++i;
-            // Start by assuming a line is empty and non-commented
-            empty = 1;
-            comment = 0;
-        }
-
         self->source_pos += self->last_len;
+
+        if (CHAR(c) == '\n')
+            ++i;
     }
     
     // Allocate memory for structures used during tokenization
@@ -297,8 +275,7 @@ int tokenize(tokenizer_t *self, int start, int end, int header, int *use_cols,
 	}
     }
     
-    // Make sure the parameter end is valid
-    int done = (end != -1 && end <= start);
+    int done = 0;
     int repeat;
     self->state = START_LINE;
     
@@ -531,6 +508,11 @@ double str_to_double(tokenizer_t *self, char *str)
     return ret;
 }
 
+void start_header_iteration(tokenizer_t *self)
+{
+    self->curr_pos = self->header_output;
+}
+
 void start_iteration(tokenizer_t *self, int col)
 {
     // Begin looping over the column string with index col
@@ -539,12 +521,22 @@ void start_iteration(tokenizer_t *self, int col)
     self->curr_pos = self->output_cols[col];
 }
 
-int finished_iteration(tokenizer_t *self)
+int _finished_iteration(tokenizer_t *self, char *buf, int len)
 {
     // Iteration is finished if we've exceeded the length of the column string
     // or the pointer is at an empty byte
-    return (self->curr_pos - self->output_cols[self->iter_col] >=
-            self->output_len[self->iter_col] || *self->curr_pos == '\x00');
+    return (self->curr_pos - buf >= len || *self->curr_pos == '\x00');
+}
+
+int finished_header_iteration(tokenizer_t *self)
+{
+    return _finished_iteration(self, self->header_output, self->header_len);
+}
+
+int finished_iteration(tokenizer_t *self)
+{
+    return _finished_iteration(self, self->output_cols[self->iter_col],
+                               self->output_len[self->iter_col]);
 }
 
 char *next_field(tokenizer_t *self)
@@ -553,10 +545,7 @@ char *next_field(tokenizer_t *self)
 
     // pass through the entire field until reaching the delimiter
     while (get_char(self, self->curr_pos) != 0)
-    {
-//        printf("%x, %d\n", *self->curr_pos, self->last_len);
 	self->curr_pos += self->last_len;
-    }
 
     ++self->curr_pos; // next field begins after the delimiter
     if (*tmp == '\x01') // empty field; this is a hack

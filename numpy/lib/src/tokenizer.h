@@ -73,7 +73,8 @@ tokenizer_t *create_tokenizer(uint32_t delimiter, uint32_t comment, uint32_t quo
 void delete_tokenizer(tokenizer_t *tokenizer);
 void delete_data(tokenizer_t *tokenizer);
 void resize_col(tokenizer_t *self, int index);
-int tokenize(tokenizer_t *self, int start, int end, int header, int *use_cols, int use_cols_len);
+int tokenize(tokenizer_t *self, int header, int *use_cols, int use_cols_len,
+             int skip_rows);
 long str_to_long(tokenizer_t *self, char *str);
 double str_to_double(tokenizer_t *self, char *str);
 void start_iteration(tokenizer_t *self, int col);

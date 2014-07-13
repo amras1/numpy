@@ -56,12 +56,14 @@ cdef extern from "tokenizer.h":
                                   int fill_extra_cols, int strip_whitespace_lines,
                                   int strip_whitespace_fields)
     void delete_tokenizer(tokenizer_t *tokenizer)
-    int tokenize(tokenizer_t *self, int start, int end, int header,
-                 int *use_cols, int use_cols_len)
+    int tokenize(tokenizer_t *self, int header, int *use_cols, int use_cols_len,
+                 int skip_header)
     long str_to_long(tokenizer_t *self, char *str)
     double str_to_double(tokenizer_t *self, char *str)
     void start_iteration(tokenizer_t *self, int col)
+    void start_header_iteration(tokenizer_t *self)
     int finished_iteration(tokenizer_t *self)
+    int finished_header_iteration(tokenizer_t *self)
     char *next_field(tokenizer_t *self)
 
 class CParserError(Exception):
@@ -86,60 +88,39 @@ cdef class CParser:
 
     cdef:
         tokenizer_t *tokenizer
-        int data_start
-        int data_end
-        object data_end_obj
-        object include_names
-        object exclude_names
-        dict fill_values
-        object fill_include_names
-        object fill_exclude_names
-        set fill_names
-        int fill_extra_cols
-        ndarray use_cols
+        int skip_header        
+        int has_header
 
     cdef public:
-        int width
         object names
         bytes source
-        object header_start
+        int width
+        ndarray use_cols
 
     def __cinit__(self, source, strip_line_whitespace, strip_line_fields,
                   delimiter=',',
                   comment=None,
                   quotechar='"',
-                  header_start=0,
-                  data_start=1,
-                  data_end=None,
+                  skip_header=0,
+                  has_header=False,
                   names=None,
-                  include_names=None,
-                  exclude_names=None,
-                  fill_values=('', '0'),
-                  fill_include_names=None,
-                  fill_exclude_names=None,
-                  fill_extra_cols=0):
+                  encoding='UTF-8'):
 
         if comment is None:
             comment = '\x00' # tokenizer ignores all comments if comment='\x00'
+        if quotechar is None:
+            quotechar = '\x00' # same here
+        if delimiter is None:
+            delimiter = ' ' # TODO: whitespace delimiting
         self.tokenizer = create_tokenizer(ord(delimiter), ord(comment), ord(quotechar),
-                                          fill_extra_cols,
+                                          0,
                                           strip_line_whitespace,
                                           strip_line_fields)
         self.source = None
-        self.setup_tokenizer(source)
-        self.header_start = header_start
-        self.data_start = data_start
-        self.data_end = -1 # keep reading data until the end
-        if data_end is not None and data_end >= 0:
-            self.data_end = data_end
-        self.data_end_obj = data_end
+        self.setup_tokenizer(source, encoding)
+        self.skip_header = skip_header
+        self.has_header = has_header
         self.names = names
-        self.include_names = include_names
-        self.exclude_names = exclude_names
-        self.fill_values = get_fill_values(fill_values)
-        self.fill_include_names = fill_include_names
-        self.fill_exclude_names = fill_exclude_names
-        self.fill_extra_cols = fill_extra_cols
     
     def __dealloc__(self):
         if self.tokenizer:
@@ -157,112 +138,48 @@ cdef class CParser:
     cpdef setup_tokenizer(self, source, encoding='UTF-8'):
         cdef char *src
 
-        """if _is_string_like(source) or hasattr(source, 'read'):
-            # Either filename or file-like object
-            if hasattr(source, 'read') or '\n' not in source: 
-                with get_readable_fileobj(source) as file_obj:
-                    source = file_obj.read()
-            # Otherwise, source is the actual data so we leave it be
-        else:
-            try:
-                source = '\n'.join(source) # iterable sequence of lines
-            except TypeError:
-                raise TypeError('Input "table" must be a file-like object, a '
-                                'string (filename or data), or an iterable')"""
-
         # Create a reference to the Python object so its char * pointer remains valid
-        source_str = source + '\n' # add newline to simplify handling last line of data
-        if sys.version_info[0] == 3:
-            self.source = source_str.encode(encoding) # encode for char * handling
-        else:
-            self.source = source_str
+        self.source = source + b'\n' # add newline to simplify handling last line of data
         src = self.source
         self.tokenizer.source = src
         self.tokenizer.source_len = len(self.source)
 
     def read_header(self):
-        if self.names:
-            self.width = len(self.names)
-
-        # header_start is a valid line number
-        elif self.header_start is not None and self.header_start >= 0:
-            if tokenize(self.tokenizer, self.header_start, -1, 1, <int *> 0, 0) != 0:
+        if tokenize(self.tokenizer, 1, <int *> 0, 0, self.skip_header) != 0:
+            if self.has_header:
                 self.raise_error("an error occurred while tokenizing the header line")
-            self.names = []
-            name = ''
-            for i in range(self.tokenizer.header_len):
-                c = self.tokenizer.header_output[i] # next char in header string
-                if not c: # zero byte -- field terminator
-                    if name:
-                        # replace empty placeholder with ''
-                        self.names.append(name.replace('\x01', ''))
-                        name = ''
-                    else:
-                        break # end of string
-                else:
-                    name += chr(c)
-            self.width = len(self.names)
+            else:
+                self.raise_error("an error occurred while tokenizing the "
+                                 "first line of data")
+        names = []
+        start_header_iteration(self.tokenizer)
+        cdef bytes name
 
-        else:
-            # Get number of columns from first data row
-            if tokenize(self.tokenizer, 0, -1, 1, <int *> 0, 0) != 0:
-                self.raise_error("an error occurred while tokenizing the first line of data")
-            self.width = 0
-            for i in range(self.tokenizer.header_len):
-                # zero byte -- field terminator
-                if not self.tokenizer.header_output[i]:
-                    # ends valid field
-                    if i > 0 and self.tokenizer.header_output[i - 1]:
-                        self.width += 1
-                    else: # end of line
-                        break
-            if self.width == 0: # no data
-                pass
-                #TODO: figure out what to do here
-                #raise core.InconsistentTableError('No data lines found, C reader '
-                #                            'cannot autogenerate column names')
-            # auto-generate names
-            self.names = ['col{0}'.format(i + 1) for i in range(self.width)]
+        while not finished_header_iteration(self.tokenizer):
+            name = next_field(self.tokenizer)
+            names.append(name.decode('utf-8'))
 
-        # "boolean" array denoting whether or not to use each column
-        self.use_cols = np.ones(self.width, np.intc)
-        if self.include_names is not None:
-            for i, name in enumerate(self.names):
-                if name not in self.include_names:
-                    self.use_cols[i] = 0
-        if self.exclude_names is not None:
-            for name in self.exclude_names:
-                try:
-                    self.use_cols[self.names.index(name)] = 0
-                except ValueError: # supplied name is invalid, ignore
-                    continue
-
-        # self.names should only contain columns included in output
-        self.names = [self.names[i] for i, should_use in enumerate(self.use_cols) if should_use]
-        self.width = len(self.names)
+        self.width = len(names)
         self.tokenizer.num_cols = self.width
-            
+
+        if self.has_header:
+            self.names = names
+        elif self.names is None:
+            self.names = ['f{0}'.format(i) for i in range(self.width)]
+
     def read(self, try_int, try_float, try_string):
-        if tokenize(self.tokenizer, self.data_start, self.data_end, 0,
-                    <int *> self.use_cols.data, len(self.use_cols)) != 0:
+        skip_rows = self.skip_header
+        if self.has_header:
+            skip_rows += 1
+        if tokenize(self.tokenizer, 0, <int *> self.use_cols.data,
+                    len(self.use_cols), skip_rows) != 0:
             self.raise_error("an error occurred while tokenizing data")
         elif self.tokenizer.num_rows == 0: # no data
             return [[]] * self.width
-        self._set_fill_names()
         return self._convert_data(try_int, try_float, try_string)
-
-    cdef _set_fill_names(self):
-        self.fill_names = set(self.names)
-        if self.fill_include_names is not None:
-            self.fill_names.intersection_update(self.fill_include_names)
-        if self.fill_exclude_names is not None:
-            self.fill_names.difference_update(self.fill_exclude_names)
 
     cdef _convert_data(self, try_int, try_float, try_string):
         cdef int num_rows = self.tokenizer.num_rows
-        if self.data_end_obj is not None and self.data_end_obj < 0:
-            # e.g. if data_end = -1, ignore the last row
-            num_rows += self.data_end_obj
         cols = {}
 
         for i, name in enumerate(self.names):
@@ -281,7 +198,12 @@ cdef class CParser:
                         raise ValueError('Column {0} failed to convert'.format(name))
                     cols[name] = self._convert_str(i, num_rows)
 
-        return cols
+        arr = np.zeros(num_rows, dtype=[(name, cols[name].dtype)
+                                        for name in self.names])
+        for name in self.names:
+            arr[name] = cols[name]
+
+        return arr
 
     cdef ndarray _convert_int(self, int i, int num_rows):
         # intialize ndarray
@@ -300,8 +222,8 @@ cdef class CParser:
             # retrieve the next field in a bytes value
             field = next_field(self.tokenizer)
 
-            if field in self.fill_values:
-                new_val = str(self.fill_values[field][0]).encode('utf-8')
+            if False:#field in self.fill_values:
+                """    new_val = str(self.fill_values[field][0]).encode('utf-8')
 
                 # Either this column applies to the field as specified in the 
                 # fill_values parameter, or no specific columns are specified
@@ -313,7 +235,8 @@ cdef class CParser:
                     converted = str_to_long(self.tokenizer, new_val)
                 else:
                     converted = str_to_long(self.tokenizer, field)
-
+                """
+                pass
             else:
                 # convert the field to long (widest integer type)
                 converted = str_to_long(self.tokenizer, field)
@@ -348,29 +271,22 @@ cdef class CParser:
             if row == num_rows:
                 break
             field = next_field(self.tokenizer)
-            if field in self.fill_values:
-                new_val = str(self.fill_values[field][0]).encode('utf-8')
+            if False:#field in self.fill_values:
+                """    new_val = str(self.fill_values[field][0]).encode('utf-8')
                 if (len(self.fill_values[field]) > 1 and self.names[i] in self.fill_values[field][1:]) \
                    or (len(self.fill_values[field]) == 1 and self.names[i] in self.fill_names):
                     mask.add(row)
                     converted = str_to_double(self.tokenizer, new_val)
                 else:
                     converted = str_to_double(self.tokenizer, field)
+                """
+                pass
             else:
                 converted = str_to_double(self.tokenizer, field)
 
-            if self.tokenizer.code == CONVERSION_ERROR:
+            if self.tokenizer.code in (CONVERSION_ERROR, OVERFLOW_ERROR):
                 self.tokenizer.code = NO_ERROR
                 raise ValueError()
-            elif self.tokenizer.code == OVERFLOW_ERROR:
-                self.tokenizer.code = NO_ERROR
-                # In numpy < 1.6, using type inference yields a float for 
-                # overflow values because the error raised is not specific.
-                # This replicates the old reading behavior (see #2234).
-                if version.LooseVersion(np.__version__) < version.LooseVersion('1.6'):
-                    col[row] = new_val if field in self.fill_values else field
-                else:
-                    raise ValueError()
             else:
                 data[row] = converted
             row += 1
@@ -395,7 +311,7 @@ cdef class CParser:
             if row == num_rows:
                 break
             field = next_field(self.tokenizer)
-            if field in self.fill_values:
+            if False:#field in self.fill_values:
                 el = str(self.fill_values[field][0])
                 if (len(self.fill_values[field]) > 1 and self.names[i] in self.fill_values[field][1:]) \
                    or (len(self.fill_values[field]) == 1 and self.names[i] in self.fill_names):

@@ -1,9 +1,11 @@
-# Licensed under a 3-clause BSD style license - see LICENSE.rst
-
 import numpy as np
+from numpy cimport ndarray
 from numpy import ma
-import six
+from distutils import version
+import csv
 import os
+from libc.stdint cimport uint32_t
+import sys
 
 cdef extern from "tokenizer.h":
     ctypedef enum tokenizer_state:
@@ -24,12 +26,12 @@ cdef extern from "tokenizer.h":
         OVERFLOW_ERROR
 
     ctypedef struct tokenizer_t:
-        char *source           # single string containing all of the input
+        char *source           # single unicode string containing all of the input
         int source_len         # length of the input
-        int source_pos         # current index in source for tokenization
-        char delimiter         # delimiter character
-        char comment           # comment character
-        char quotechar         # quote character
+        char *source_pos       # current position in source for tokenization
+        uint32_t delimiter     # delimiter character
+        uint32_t comment       # comment character
+        uint32_t quotechar     # quote character
         char *header_output    # string containing header data
         char **output_cols     # array of output strings for each column
         char **col_ptrs        # array of pointers to current output position for each col
@@ -50,7 +52,7 @@ cdef extern from "tokenizer.h":
         # source: "A,B,C\n10,5.,6\n1,2,3"
         # output_cols: ["A\x0010\x001", "B\x005.\x002", "C\x006\x003"]
 
-    tokenizer_t *create_tokenizer(char delimiter, char comment, char quotechar,
+    tokenizer_t *create_tokenizer(uint32_t delimiter, uint32_t comment, uint32_t quotechar,
                                   int fill_extra_cols, int strip_whitespace_lines,
                                   int strip_whitespace_fields)
     void delete_tokenizer(tokenizer_t *tokenizer)
@@ -71,8 +73,8 @@ class CParserError(Exception):
 ERR_CODES = dict(enumerate([
     "no error",
     "invalid line supplied",
-    "too many columns found in row"
-    "not enough columns found in row"
+    lambda line: "too many columns found in line {0} of data".format(line),
+    lambda line: "not enough columns found in line {0} of data".format(line),
     "type conversion error"
     ]))
 
@@ -92,14 +94,14 @@ cdef class CParser:
         dict fill_values
         object fill_include_names
         object fill_exclude_names
-        object fill_names
+        set fill_names
         int fill_extra_cols
-        object use_cols
+        ndarray use_cols
 
     cdef public:
         int width
         object names
-        object source
+        bytes source
         object header_start
 
     def __cinit__(self, source, strip_line_whitespace, strip_line_fields,
@@ -152,19 +154,28 @@ cdef class CParser:
 
         raise CParserError("{0}: {1}".format(msg, err_msg))
 
-    cdef setup_tokenizer(self, source):
+    cpdef setup_tokenizer(self, source, encoding='UTF-8'):
         cdef char *src
-        input = source
 
-        if isinstance(input, six.string_types): # Filename
-            file_obj = open(input)
-            source = input.read()
-            file_obj.close()
+        """if _is_string_like(source) or hasattr(source, 'read'):
+            # Either filename or file-like object
+            if hasattr(source, 'read') or '\n' not in source: 
+                with get_readable_fileobj(source) as file_obj:
+                    source = file_obj.read()
+            # Otherwise, source is the actual data so we leave it be
         else:
-            source = input.read()
+            try:
+                source = '\n'.join(source) # iterable sequence of lines
+            except TypeError:
+                raise TypeError('Input "table" must be a file-like object, a '
+                                'string (filename or data), or an iterable')"""
+
         # Create a reference to the Python object so its char * pointer remains valid
         source_str = source + '\n' # add newline to simplify handling last line of data
-        self.source = source_str.encode('UTF-8') # encode in UTF-8 for char * handling
+        if sys.version_info[0] == 3:
+            self.source = source_str.encode(encoding) # encode for char * handling
+        else:
+            self.source = source_str
         src = self.source
         self.tokenizer.source = src
         self.tokenizer.source_len = len(self.source)
@@ -206,12 +217,12 @@ cdef class CParser:
                     else: # end of line
                         break
             if self.width == 0: # no data
-                raise core.InconsistentTableError('No data lines found, C reader '
-                                            'cannot autogenerate column names')
+                pass
+                #TODO: figure out what to do here
+                #raise core.InconsistentTableError('No data lines found, C reader '
+                #                            'cannot autogenerate column names')
             # auto-generate names
-            self.names = []
-            for i in range(self.width):
-                self.names.append('col{0}'.format(i + 1))
+            self.names = ['col{0}'.format(i + 1) for i in range(self.width)]
 
         # "boolean" array denoting whether or not to use each column
         self.use_cols = np.ones(self.width, np.intc)
@@ -227,11 +238,7 @@ cdef class CParser:
                     continue
 
         # self.names should only contain columns included in output
-        copy = []
-        for i, should_use in enumerate(self.use_cols):
-            if should_use:
-                copy.append(self.names[i])
-        self.names = copy
+        self.names = [self.names[i] for i, should_use in enumerate(self.use_cols) if should_use]
         self.width = len(self.names)
         self.tokenizer.num_cols = self.width
             
@@ -252,8 +259,7 @@ cdef class CParser:
             self.fill_names.difference_update(self.fill_exclude_names)
 
     cdef _convert_data(self, try_int, try_float, try_string):
-        cdef int num_rows
-        num_rows = self.tokenizer.num_rows
+        cdef int num_rows = self.tokenizer.num_rows
         if self.data_end_obj is not None and self.data_end_obj < 0:
             # e.g. if data_end = -1, ignore the last row
             num_rows += self.data_end_obj
@@ -277,13 +283,14 @@ cdef class CParser:
 
         return cols
 
-    cdef _convert_int(self, int i, int num_rows):
-        col = np.empty(num_rows, dtype=np.int_)
+    cdef ndarray _convert_int(self, int i, int num_rows):
+        # intialize ndarray
+        cdef ndarray col = np.empty(num_rows, dtype=np.int_)
         cdef long converted
-        cdef int row
-        row = 0
-        cdef long *data
-        data = <long *> col.data # pointer to raw data
+        cdef int row = 0
+        cdef long *data = <long *> col.data # pointer to raw data
+        cdef bytes field
+        cdef bytes new_val
         mask = set() # set of indices for masked values
         start_iteration(self.tokenizer, i) # begin the iteration process in C
 
@@ -321,23 +328,19 @@ cdef class CParser:
 
         if mask:
             # convert to masked_array
-            param = []
-            for i in range(row):
-                if i in mask:
-                    param.append(1)
-                else:
-                    param.append(0)
-            return ma.masked_array(col, mask=param)
+            return ma.masked_array(col, mask=[1 if i in mask else 0 for i in
+                                              range(row)])
         else:
             return col
 
-    cdef _convert_float(self, int i, int num_rows):
-        col = np.empty(num_rows, dtype=np.float_)
+    cdef ndarray _convert_float(self, int i, int num_rows):
+        # very similar to _convert_int()
+        cdef ndarray col = np.empty(num_rows, dtype=np.float_)
         cdef double converted
-        cdef int row
-        row = 0
-        cdef double *data
-        data = <double *> col.data
+        cdef int row = 0
+        cdef double *data = <double *> col.data
+        cdef bytes field
+        cdef bytes new_val
         mask = set()
 
         start_iteration(self.tokenizer, i)
@@ -356,32 +359,35 @@ cdef class CParser:
             else:
                 converted = str_to_double(self.tokenizer, field)
 
-            if self.tokenizer.code in (CONVERSION_ERROR, OVERFLOW_ERROR):
+            if self.tokenizer.code == CONVERSION_ERROR:
                 self.tokenizer.code = NO_ERROR
                 raise ValueError()
+            elif self.tokenizer.code == OVERFLOW_ERROR:
+                self.tokenizer.code = NO_ERROR
+                # In numpy < 1.6, using type inference yields a float for 
+                # overflow values because the error raised is not specific.
+                # This replicates the old reading behavior (see #2234).
+                if version.LooseVersion(np.__version__) < version.LooseVersion('1.6'):
+                    col[row] = new_val if field in self.fill_values else field
+                else:
+                    raise ValueError()
             else:
                 data[row] = converted
             row += 1
 
         if mask:
-            # convert to masked_array
-            param = []
-            for i in range(row):
-                if i in mask:
-                    param.append(1)
-                else:
-                    param.append(0)
-            return ma.masked_array(col, mask=param)
+            return ma.masked_array(col, mask=[1 if i in mask else 0 for i in
+                                              range(row)])
         else:
             return col
 
-    cdef _convert_str(self, int i, int num_rows):
+    cdef ndarray _convert_str(self, int i, int num_rows):
         # similar to _convert_int, but no actual conversion
-        col = np.empty(num_rows, dtype=object)
-        cdef int row
-        row = 0
-        cdef int max_len
-        max_len = 0 # greatest length of any element
+        cdef ndarray col = np.empty(num_rows, dtype=object)
+        cdef int row = 0
+        cdef bytes field
+        cdef bytes new_val
+        cdef int max_len = 0 # greatest length of any element
         mask = set()
 
         start_iteration(self.tokenizer, i)
@@ -404,35 +410,28 @@ cdef class CParser:
             row += 1
 
         # convert to string with smallest length possible
-        col = col.astype('|S{0}'.format(max_len))
+        col = col.astype('U{0}'.format(max_len))
         if mask:
-            # convert to masked_array
-            param = []
-            for i in range(row):
-                if i in mask:
-                    param.append(1)
-                else:
-                    param.append(0)
-            return ma.masked_array(col, mask=param)
+            return ma.masked_array(col, mask=[1 if i in mask else 0 for i in
+                                              range(row)])
         else:
             return col
 
 def get_fill_values(fill_values, read=True):
-    if len(fill_values) > 0 and isinstance(fill_values[0], six.string_types):
+    """if len(fill_values) > 0 and isinstance(fill_values[0], six.string_types):
         # e.g. fill_values=('999', '0')
         fill_values = [fill_values]
     else:
         fill_values = fill_values
     try:
         # Create a dict with the values to be replaced as keys
-        copy = []
-        for l in fill_values:
-            if read:
-                copy.append((l[0].encode('utf-8'), l[1:]))
-            else:
-                copy.append((l[0], l[1:]))
+        if read:
+            fill_values = dict([(l[0].encode('utf-8'), l[1:]) for l in fill_values])
+        else:
+            # don't worry about unicode for writing
+            fill_values = dict([(l[0], l[1:]) for l in fill_values])
 
     except IndexError:
         raise ValueError("Format of fill_values must be "
-                         "(<bad>, <fill>, <optional col1>, ...)")
-    return copy
+                         "(<bad>, <fill>, <optional col1>, ...)")"""
+    return fill_values

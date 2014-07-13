@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <stdint.h>
 
 typedef enum
 {
@@ -31,14 +32,14 @@ typedef enum
 
 typedef struct
 {
-    char *source;          // single string containing all of the input
+    char *source;          // single unicode string containing all of the input
     int source_len;        // length of the input
-    int source_pos;        // current index in source for tokenization
-    char delimiter;        // delimiter character
-    char comment;          // comment character
-    char quotechar;        // quote character
+    char *source_pos;      // current position in source for tokenization
+    uint32_t delimiter;    // delimiter character
+    uint32_t comment;      // comment character
+    uint32_t quotechar;    // quote character
     char *header_output;   // string containing header data
-    char **output_cols;    // array of output strings for each column
+    char **output_cols;    // array of output unicode strings for each column
     char **col_ptrs;       // array of pointers to current output position for each col
     int *output_len;       // length of each output column string
     int header_len;        // length of the header output string
@@ -49,9 +50,10 @@ typedef struct
     err_code code;         // represents the latest error that has occurred
     int iter_col;          // index of the column being iterated over
     char *curr_pos;        // current iteration position
-    char *buf;             // buffer for misc. data
+    char *buf;             // buffer for misc. data    
     int strip_whitespace_lines;  // whether to strip whitespace at the beginning and end of lines
     int strip_whitespace_fields; // whether to strip whitespace at the beginning and end of fields
+    int last_len;          // length in bytes of most recent unicode codepoint
 } tokenizer_t;
 
 /*
@@ -65,8 +67,9 @@ output_cols: ["A\x0010\x001", "B\x005.\x002", "C\x006\x003"]
 #define INITIAL_COL_SIZE 50
 #define INITIAL_HEADER_SIZE 50
 
-tokenizer_t *create_tokenizer(char delimiter, char comment, char quotechar, int fill_extra_cols,
-                              int strip_whitespace_lines, int strip_whitespace_fields);
+tokenizer_t *create_tokenizer(uint32_t delimiter, uint32_t comment, uint32_t quotechar,
+                              int fill_extra_cols, int strip_whitespace_lines,
+                              int strip_whitespace_fields);
 void delete_tokenizer(tokenizer_t *tokenizer);
 void delete_data(tokenizer_t *tokenizer);
 void resize_col(tokenizer_t *self, int index);
@@ -76,5 +79,7 @@ double str_to_double(tokenizer_t *self, char *str);
 void start_iteration(tokenizer_t *self, int col);
 int finished_iteration(tokenizer_t *self);
 char *next_field(tokenizer_t *self);
+uint32_t get_char(tokenizer_t *self, char *buf);
+uint32_t next_char(tokenizer_t *self);
 
 #endif

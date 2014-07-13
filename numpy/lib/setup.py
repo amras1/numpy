@@ -13,8 +13,9 @@ def configuration(parent_package='',top_path=None):
     config.add_extension('_compiled_base',
                          sources=[join('src', '_compiled_base.c')]
                          )
-    config.add_extension('tokenizer',
-                         sources=[join('src', 'tokenizer.c')],
+    config.add_extension('cparser',
+                         sources=[join('src', 'tokenizer.c'),
+                                  join('src', 'cparser.c')],
                          depends=[join('src', 'tokenizer.h')]
                          )
 

@@ -88,7 +88,8 @@ cdef class CParser:
 
     cdef:
         tokenizer_t *tokenizer
-        int skip_header        
+        int skip_header
+        int skip_footer
         int has_header
 
     cdef public:
@@ -102,6 +103,7 @@ cdef class CParser:
                   comment=None,
                   quotechar='"',
                   skip_header=0,
+                  skip_footer=0,
                   has_header=False,
                   names=None,
                   encoding='UTF-8'):
@@ -119,6 +121,7 @@ cdef class CParser:
         self.source = None
         self.setup_tokenizer(source, encoding)
         self.skip_header = skip_header
+        self.skip_footer = skip_footer
         self.has_header = has_header
         self.names = names
     
@@ -167,7 +170,7 @@ cdef class CParser:
         elif self.names is None:
             self.names = ['f{0}'.format(i) for i in range(self.width)]
 
-    def read(self, try_int, try_float, try_string):
+    def read(self, dtypes):
         skip_rows = self.skip_header
         if self.has_header:
             skip_rows += 1
@@ -176,38 +179,43 @@ cdef class CParser:
             self.raise_error("an error occurred while tokenizing data")
         elif self.tokenizer.num_rows == 0: # no data
             return [[]] * self.width
-        return self._convert_data(try_int, try_float, try_string)
+        return self._convert_data(dtypes)
 
-    cdef _convert_data(self, try_int, try_float, try_string):
+    cdef _convert_data(self, dtypes):
         cdef int num_rows = self.tokenizer.num_rows
         cols = {}
 
         for i, name in enumerate(self.names):
             # Try int first, then float, then string
             try:
-                if try_int and not try_int[name]:
+                if dtypes is not None and dtypes[i].kind != 'i':
                     raise ValueError()
-                cols[name] = self._convert_int(i, num_rows)
+                cols[name] = self._convert_int(i, num_rows, dtypes[i] if
+                                               dtypes is not None else None)
             except ValueError:
                 try:
-                    if try_float and not try_float[name]:
+                    if dtypes is not None and dtypes[i].kind != 'f':
                         raise ValueError()
-                    cols[name] = self._convert_float(i, num_rows)
+                    cols[name] = self._convert_float(i, num_rows, dtypes[i] if
+                                                     dtypes is not None else None)
                 except ValueError:
-                    if try_string and not try_string[name]:
+                    if dtypes is not None and dtypes[i].kind != 'S': #TODO: handle unicode
                         raise ValueError('Column {0} failed to convert'.format(name))
-                    cols[name] = self._convert_str(i, num_rows)
+                    cols[name] = self._convert_str(i, num_rows, dtypes[i] if
+                                                   dtypes is not None else None)
 
-        arr = np.zeros(num_rows, dtype=[(name, cols[name].dtype)
+        print([(name, cols[name].dtype) for name in self.names])
+        arr = np.zeros(num_rows, dtype=[(name.encode('utf-8'), cols[name].dtype)
                                         for name in self.names])
         for name in self.names:
             arr[name] = cols[name]
 
         return arr
 
-    cdef ndarray _convert_int(self, int i, int num_rows):
+    cdef ndarray _convert_int(self, int i, int num_rows, dtype):
         # intialize ndarray
-        cdef ndarray col = np.empty(num_rows, dtype=np.int_)
+        cdef ndarray col = np.empty(num_rows, dtype=dtype if dtype is not None
+                                    else np.int_)
         cdef long converted
         cdef int row = 0
         cdef long *data = <long *> col.data # pointer to raw data
@@ -256,9 +264,10 @@ cdef class CParser:
         else:
             return col
 
-    cdef ndarray _convert_float(self, int i, int num_rows):
+    cdef ndarray _convert_float(self, int i, int num_rows, dtype):
         # very similar to _convert_int()
-        cdef ndarray col = np.empty(num_rows, dtype=np.float_)
+        cdef ndarray col = np.empty(num_rows, dtype=dtype if dtype is not
+                                    None else np.float_)
         cdef double converted
         cdef int row = 0
         cdef double *data = <double *> col.data
@@ -297,9 +306,10 @@ cdef class CParser:
         else:
             return col
 
-    cdef ndarray _convert_str(self, int i, int num_rows):
+    cdef ndarray _convert_str(self, int i, int num_rows, dtype):
         # similar to _convert_int, but no actual conversion
-        cdef ndarray col = np.empty(num_rows, dtype=object)
+        cdef ndarray col = np.empty(num_rows, dtype=dtype if dtype is not
+                                    None else object)
         cdef int row = 0
         cdef bytes field
         cdef bytes new_val
@@ -325,8 +335,9 @@ cdef class CParser:
             col[row] = el
             row += 1
 
-        # convert to string with smallest length possible
-        col = col.astype('U{0}'.format(max_len))
+        if dtype is not None:
+            # convert to string with smallest length possible
+            col = col.astype('U{0}'.format(max_len))
         if mask:
             return ma.masked_array(col, mask=[1 if i in mask else 0 for i in
                                               range(row)])

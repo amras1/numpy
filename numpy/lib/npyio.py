@@ -1207,6 +1207,7 @@ def genfromtxt(fname, dtype=float, comments='#', delimiter=None,
                                    deletechars=deletechars,
                                    case_sensitive=case_sensitive,
                                    replace_space=replace_space)
+    supplied_names = names is not None
     has_header = False
     if names is True:
         has_header = True
@@ -1219,11 +1220,14 @@ def genfromtxt(fname, dtype=float, comments='#', delimiter=None,
                              comment=comments,
                              quotechar=None,
                              skip_header=skip_header,
+                             skip_footer=skip_footer,
                              has_header=has_header,
                              names=names,
                              encoding=encoding)
     engine.read_header()
     engine.names = validate_names(engine.names)
+    if dtype is not None:
+        dtype = easy_dtype(dtype, defaultfmt=defaultfmt, names=engine.names)
 
     if usecols is not None:
         engine.use_cols = np.zeros(engine.width, np.intc)
@@ -1231,13 +1235,24 @@ def genfromtxt(fname, dtype=float, comments='#', delimiter=None,
             if _is_string_like(col):
                 engine.use_cols[engine.names.index(col)] = 1
             elif col < 0:
-                engine.use_cols[col + len(engine.names)] = 1
+                engine.use_cols[col + engine.width] = 1
             else:
                 engine.use_cols[col] = 1
+        if dtype is not None and len(dtype) > len(usecols):
+            descr = dtype.descr
+            dtype = np.dtype([descr[i] for i in range(engine.width) if
+                              engine.use_cols[i]])
+            engine.names = list(dtype.names)
+        elif supplied_names and len(engine.names) > len(usecols):
+            engine.names = [name for i, name in enumerate(engine.names)
+                            if engine.use_cols[i]]
     else:
         engine.use_cols = np.ones(engine.width, np.intc)
+        if supplied_names and dtype is not None:
+            engine.names = list(dtype.names)
     
-    return engine.read({}, {}, {})
+    # TODO: add bool, complex
+    return engine.read(dtype)
 
 def ndfromtxt(fname, **kwargs):
     """

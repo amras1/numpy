@@ -138,7 +138,7 @@ cdef class CParser:
 
         raise CParserError("{0}: {1}".format(msg, err_msg))
 
-    cpdef setup_tokenizer(self, source, encoding='UTF-8'):
+    cpdef setup_tokenizer(self, source, encoding): #wait...this has to use encoding
         cdef char *src
 
         # Create a reference to the Python object so its char * pointer remains valid
@@ -156,11 +156,13 @@ cdef class CParser:
                                  "first line of data")
         names = []
         start_header_iteration(self.tokenizer)
-        cdef bytes name
 
         while not finished_header_iteration(self.tokenizer):
-            name = next_field(self.tokenizer)
-            names.append(name.decode('utf-8'))
+            name = next_field(self.tokenizer).decode('utf-8')
+            try:
+                names.append(name.encode())
+            except UnicodeEncodeError:
+                names.append(name)
 
         self.width = len(names)
         self.tokenizer.num_cols = self.width
@@ -178,7 +180,7 @@ cdef class CParser:
                     len(self.use_cols), skip_rows) != 0:
             self.raise_error("an error occurred while tokenizing data")
         elif self.tokenizer.num_rows == 0: # no data
-            return [[]] * self.width
+            return [[]] * self.width #TODO: make this ndarray, warn
         return self._convert_data(dtypes)
 
     cdef _convert_data(self, dtypes):
@@ -204,7 +206,6 @@ cdef class CParser:
                     cols[name] = self._convert_str(i, num_rows, dtypes[i] if
                                                    dtypes is not None else None)
 
-        print([(name, cols[name].dtype) for name in self.names])
         arr = np.zeros(num_rows, dtype=[(name.encode('utf-8'), cols[name].dtype)
                                         for name in self.names])
         for name in self.names:
@@ -317,7 +318,7 @@ cdef class CParser:
         mask = set()
 
         start_iteration(self.tokenizer, i)
-        while not finished_iteration(self.tokenizer):
+        while not finished_iteration(self.tokenizer): #TODO: add skip_footer
             if row == num_rows:
                 break
             field = next_field(self.tokenizer)
@@ -336,8 +337,11 @@ cdef class CParser:
             row += 1
 
         if dtype is not None:
-            # convert to string with smallest length possible
-            col = col.astype('U{0}'.format(max_len))
+            try:
+                # convert to string with smallest length possible
+                col = col.astype('S{0}'.format(max_len))
+            except UnicodeEncodeError: # column contains chars outside range
+                col = col.astype('U{0}'.format(max_len))
         if mask:
             return ma.masked_array(col, mask=[1 if i in mask else 0 for i in
                                               range(row)])

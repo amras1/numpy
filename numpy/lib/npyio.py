@@ -1226,6 +1226,8 @@ def genfromtxt(fname, dtype=float, comments='#', delimiter=None,
                              encoding=encoding)
     engine.read_header()
     engine.names = validate_names(engine.names)
+    orig_dtype = np.dtype(dtype)
+
     if dtype is not None:
         dtype = easy_dtype(dtype, defaultfmt=defaultfmt, names=engine.names)
 
@@ -1252,7 +1254,10 @@ def genfromtxt(fname, dtype=float, comments='#', delimiter=None,
             engine.names = list(dtype.names)
     
     # TODO: add bool, complex
-    return engine.read(dtype)
+    arr = engine.read(dtype)
+    if len(orig_dtype) == 0 and not supplied_names: # convert to 2d ndarray
+        arr = arr.view(orig_dtype).reshape(arr.shape + (-1,))
+    return arr
 
 def ndfromtxt(fname, **kwargs):
     """

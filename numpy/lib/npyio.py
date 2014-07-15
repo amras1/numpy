@@ -1197,7 +1197,7 @@ def genfromtxt(fname, dtype=float, comments='#', delimiter=None,
             source = fh.read()
             fh.close()
         else:
-            source = '\n'.join(iter(fname))
+            source = ''.join(iter(fname))
     except TypeError:
         raise TypeError(
             "fname must be a string, filehandle, or generator. "
@@ -1215,7 +1215,7 @@ def genfromtxt(fname, dtype=float, comments='#', delimiter=None,
     elif _is_string_like(names):
         names = [_.strip() for _ in names.split(',')]
         
-    engine = cparser.CParser(source, False, autostrip,
+    engine = cparser.CParser(source, False, autostrip or delimiter is None,
                              delimiter=delimiter,
                              comment=comments,
                              quotechar=None,

@@ -4,7 +4,7 @@
 
 tokenizer_t *create_tokenizer(uint32_t delimiter, uint32_t comment, uint32_t quotechar,
                               int fill_extra_cols, int strip_whitespace_lines,
-                              int strip_whitespace_fields)
+                              int strip_whitespace_fields, int whitespace_delim)
 {
     // Create the tokenizer in memory
     tokenizer_t *tokenizer = (tokenizer_t *) malloc(sizeof(tokenizer_t));
@@ -30,6 +30,8 @@ tokenizer_t *create_tokenizer(uint32_t delimiter, uint32_t comment, uint32_t quo
     tokenizer->curr_pos = 0;
     tokenizer->strip_whitespace_lines = strip_whitespace_lines;
     tokenizer->strip_whitespace_fields = strip_whitespace_fields;
+    tokenizer->first_invalid_line = -1;
+    tokenizer->whitespace_delim = whitespace_delim;
 
     // This is a bit of a hack -- buf holds an empty string to represent
     // empty field values
@@ -173,7 +175,9 @@ void resize_header(tokenizer_t *self)
     }                                                                   \
     else if (real_col >= use_cols_len)                                  \
     {                                                                   \
-        RETURN(TOO_MANY_COLS);                                          \
+        self->code = TOO_MANY_COLS;                                     \
+        if (self->first_invalid_line == -1)                             \
+            self->first_invalid_line = self->num_rows;                  \
     }                                                                   \
     else if (use_cols[real_col])                                        \
     {                                                                   \
@@ -194,7 +198,11 @@ void resize_header(tokenizer_t *self)
         }                                                               \
         PUSH_CHAR('\x00');                                              \
         if (++col > self->num_cols)                                     \
-            RETURN(TOO_MANY_COLS);                                      \
+        {                                                               \
+            self->code = TOO_MANY_COLS;                                 \
+            if (self->first_invalid_line == -1)                         \
+                self->first_invalid_line = self->num_rows;              \
+        }                                                               \
     }                                                                   \
     ++real_col;
 
@@ -215,9 +223,14 @@ void resize_header(tokenizer_t *self)
             PUSH_CHAR('\x01');				\
 	    END_FIELD();				\
 	}						\
-    else if (col < self->num_cols)			\
-	RETURN(NOT_ENOUGH_COLS);			\
-    ++self->num_rows;
+    else if (col < self->num_cols && !(col == 0 && self->whitespace_delim)) \
+    {                                                   \
+        self->code = NOT_ENOUGH_COLS;                   \
+        if (self->first_invalid_line == -1)             \
+            self->first_invalid_line = self->num_rows;  \
+    }                                                   \
+    if (col != 0 || !self->whitespace_delim)            \
+        ++self->num_rows;
 
 // Set the error code to c for later retrieval and return c
 #define RETURN(c) do { self->code = c; return c; } while (0)
@@ -235,9 +248,9 @@ int tokenize(tokenizer_t *self, int header, int *use_cols, int use_cols_len,
     self->header_len = INITIAL_HEADER_SIZE;
     self->num_rows = 0;
     self->source_pos = self->source;
-    int i = 0;
+    self->first_invalid_line = -1;
+    int i = 0, j;
     int whitespace = 1;
-    int j;
     
     while (i < skip_rows)
     {
@@ -246,7 +259,7 @@ int tokenize(tokenizer_t *self, int header, int *use_cols, int use_cols_len,
             if (header)
                 RETURN(INVALID_LINE); // header line is required
             else
-                return NO_ERROR; // no data in input
+                RETURN(NO_ERROR); // no data in input
         }
 
         c = next_char(self);
@@ -278,6 +291,7 @@ int tokenize(tokenizer_t *self, int header, int *use_cols, int use_cols_len,
     int done = 0;
     int repeat;
     self->state = START_LINE;
+    self->code = NO_ERROR;
     
     // Loop until all of source has been read or we finish for some other reason
     while (self->source_pos - self->source < self->source_len && !done)
@@ -300,8 +314,11 @@ int tokenize(tokenizer_t *self, int header, int *use_cols, int use_cols_len,
                     break;
 		else if (self->comment != 0 && c == self->comment)
 		{
-                    // comment line; ignore
-		    self->state = COMMENT;
+                    if (!header)
+                    {
+                        // comment line; ignore
+                        self->state = COMMENT;
+                    }
 		    break;
 		}
                 // initialize variables for the beginning of line parsing
@@ -385,7 +402,7 @@ int tokenize(tokenizer_t *self, int header, int *use_cols, int use_cols_len,
 		    END_LINE();
 		    self->state = START_LINE;
 		}
-		else if (c == self->quotechar) // start parsing quoted field
+		else if (self->quotechar != 0 && c == self->quotechar)
 		    self->state = START_QUOTED_FIELD;
 		else
 		{
@@ -442,7 +459,8 @@ int tokenize(tokenizer_t *self, int header, int *use_cols, int use_cols_len,
 		break;
 		
 	    case QUOTED_FIELD:
-		if (c == self->quotechar) // Parse rest of field normally, e.g. "ab"c
+                // Parse rest of field normally, e.g. "ab"c
+		if (c == self->quotechar)
 		    self->state = FIELD;
 		else if (CHAR(c) == '\n')
 		    self->state = QUOTED_FIELD_NEWLINE;
@@ -478,7 +496,7 @@ int tokenize(tokenizer_t *self, int header, int *use_cols, int use_cols_len,
         self->source_pos += self->last_len;
     }
     
-    RETURN(0);
+    RETURN(self->code);
 }
 
 long str_to_long(tokenizer_t *self, char *str)

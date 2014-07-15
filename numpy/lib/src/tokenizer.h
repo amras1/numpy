@@ -54,6 +54,8 @@ typedef struct
     int strip_whitespace_lines;  // whether to strip whitespace at the beginning and end of lines
     int strip_whitespace_fields; // whether to strip whitespace at the beginning and end of fields
     int last_len;          // length in bytes of most recent unicode codepoint
+    int first_invalid_line; // index of first invalid line of data
+    int whitespace_delim;  // whether the parsing is whitespace-delimited
 } tokenizer_t;
 
 /*
@@ -69,7 +71,7 @@ output_cols: ["A\x0010\x001", "B\x005.\x002", "C\x006\x003"]
 
 tokenizer_t *create_tokenizer(uint32_t delimiter, uint32_t comment, uint32_t quotechar,
                               int fill_extra_cols, int strip_whitespace_lines,
-                              int strip_whitespace_fields);
+                              int strip_whitespace_fields, int whitespace_delim);
 void delete_tokenizer(tokenizer_t *tokenizer);
 void delete_data(tokenizer_t *tokenizer);
 void resize_col(tokenizer_t *self, int index);

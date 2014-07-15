@@ -47,6 +47,8 @@ cdef extern from "tokenizer.h":
         char *buf              # buffer for misc. data
         int strip_whitespace_lines  # whether to strip whitespace at the beginning and end of lines
         int strip_whitespace_fields # whether to strip whitespace at the beginning and end of fields
+        int first_invalid_line # index of first invalid line of data
+        int whitespace_delim   # whether the parsing is whitespace-delimited
         # Example input/output
         # --------------------
         # source: "A,B,C\n10,5.,6\n1,2,3"
@@ -54,7 +56,7 @@ cdef extern from "tokenizer.h":
 
     tokenizer_t *create_tokenizer(uint32_t delimiter, uint32_t comment, uint32_t quotechar,
                                   int fill_extra_cols, int strip_whitespace_lines,
-                                  int strip_whitespace_fields)
+                                  int strip_whitespace_fields, int whitespace_delim)
     void delete_tokenizer(tokenizer_t *tokenizer)
     int tokenize(tokenizer_t *self, int header, int *use_cols, int use_cols_len,
                  int skip_header)
@@ -112,12 +114,12 @@ cdef class CParser:
             comment = '\x00' # tokenizer ignores all comments if comment='\x00'
         if quotechar is None:
             quotechar = '\x00' # same here
-        if delimiter is None:
-            delimiter = ' ' # TODO: whitespace delimiting
-        self.tokenizer = create_tokenizer(ord(delimiter), ord(comment), ord(quotechar),
+        self.tokenizer = create_tokenizer(ord(delimiter or ' '), ord(comment),
+                                          ord(quotechar),
                                           0,
                                           strip_line_whitespace,
-                                          strip_line_fields)
+                                          strip_line_fields,
+                                          not delimiter)
         self.source = None
         self.setup_tokenizer(source, encoding)
         self.skip_header = skip_header
@@ -132,9 +134,10 @@ cdef class CParser:
     cdef raise_error(self, msg):
         err_msg = ERR_CODES.get(self.tokenizer.code, "unknown error")
 
-        # error code is lambda function taking current line as input
+        # error code is lambda function taking invalid line as input
         if callable(err_msg):
-            err_msg = err_msg(self.tokenizer.num_rows + 1)
+            line = self.tokenizer.first_invalid_line
+            err_msg = err_msg(line if line != -1 else self.tokenizer.num_rows)
 
         raise CParserError("{0}: {1}".format(msg, err_msg))
 
@@ -178,13 +181,15 @@ cdef class CParser:
             skip_rows += 1
         if tokenize(self.tokenizer, 0, <int *> self.use_cols.data,
                     len(self.use_cols), skip_rows) != 0:
-            self.raise_error("an error occurred while tokenizing data")
+            if self.tokenizer.first_invalid_line == -1 or self.tokenizer.first_invalid_line \
+                        < self.tokenizer.num_rows - self.skip_footer:
+                self.raise_error("an error occurred while tokenizing data")
         elif self.tokenizer.num_rows == 0: # no data
             return [[]] * self.width #TODO: make this ndarray, warn
         return self._convert_data(dtypes)
 
     cdef _convert_data(self, dtypes):
-        cdef int num_rows = self.tokenizer.num_rows
+        cdef int num_rows = self.tokenizer.num_rows - self.skip_footer
         cols = {}
 
         for i, name in enumerate(self.names):
@@ -318,7 +323,7 @@ cdef class CParser:
         mask = set()
 
         start_iteration(self.tokenizer, i)
-        while not finished_iteration(self.tokenizer): #TODO: add skip_footer
+        while not finished_iteration(self.tokenizer):
             if row == num_rows:
                 break
             field = next_field(self.tokenizer)
@@ -336,7 +341,7 @@ cdef class CParser:
             col[row] = el
             row += 1
 
-        if dtype is not None:
+        if dtype is None:
             try:
                 # convert to string with smallest length possible
                 col = col.astype('S{0}'.format(max_len))
